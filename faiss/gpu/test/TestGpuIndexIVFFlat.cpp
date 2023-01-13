@@ -27,7 +27,7 @@ struct Options {
 
         numCentroids = std::sqrt((float)numAdd / 2);
         numTrain = numCentroids * 40;
-        nprobe = faiss::gpu::randVal(std::min(10, numCentroids), numCentroids);
+        nprobe = std::min(numCentroids, int(numCentroids / 2) + 10);//faiss::gpu::randVal(std::min(50, numCentroids), numCentroids);
         numQuery = faiss::gpu::randVal(32, 100);
 
         // Due to the approximate nature of the query and of floating point
@@ -64,12 +64,10 @@ struct Options {
 };
 
 void queryTest(
+        Options opt,
         faiss::MetricType metricType,
-        bool useFloat16CoarseQuantizer,
-        int dimOverride = -1) {
+        bool useFloat16CoarseQuantizer) {
     for (int tries = 0; tries < 2; ++tries) {
-        Options opt;
-        opt.dim = dimOverride != -1 ? dimOverride : opt.dim;
 
         std::vector<float> trainVecs =
                 faiss::gpu::randVecs(opt.numTrain, opt.dim);
@@ -99,8 +97,6 @@ void queryTest(
         faiss::gpu::GpuIndexIVFFlat gpuIndex(
                 &res, cpuIndex.d, cpuIndex.nlist, cpuIndex.metric_type, config);
         gpuIndex.copyFrom(&cpuIndex);
-
-
         gpuIndex.setNumProbes(opt.nprobe);
 
         bool compFloat16 = useFloat16CoarseQuantizer;
@@ -127,6 +123,12 @@ void addTest(faiss::MetricType metricType, bool useFloat16CoarseQuantizer) {
         std::vector<float> trainVecs =
                 faiss::gpu::randVecs(opt.numTrain, opt.dim);
         std::vector<float> addVecs = faiss::gpu::randVecs(opt.numAdd, opt.dim);
+
+        printf("original add vectors: [");
+        for(int i = 0; i < 50; ++i) {
+            printf("%f, ", addVecs[i]);
+        }
+        printf("]\n");
 
         faiss::IndexFlatL2 quantizerL2(opt.dim);
         faiss::IndexFlatIP quantizerIP(opt.dim);
@@ -294,21 +296,28 @@ TEST(TestGpuIndexIVFFlat, Float16_32_Add_IP) {
 //
 
 TEST(TestGpuIndexIVFFlat, Float32_Query_L2) {
-    queryTest(faiss::METRIC_L2, false);
+    queryTest(Options(), faiss::METRIC_L2, false);
 }
 
 TEST(TestGpuIndexIVFFlat, Float32_Query_IP) {
-    queryTest(faiss::METRIC_INNER_PRODUCT, false);
+    queryTest(Options(), faiss::METRIC_INNER_PRODUCT, false);
+}
+
+TEST(TestGpuIndexIVFFlat, LargeBatch) {
+    Options opt;
+    opt.dim = 3;
+    opt.numQuery = 100000;
+    queryTest(opt, faiss::METRIC_L2, false);
 }
 
 // float16 coarse quantizer
 
 TEST(TestGpuIndexIVFFlat, Float16_32_Query_L2) {
-    queryTest(faiss::METRIC_L2, true);
+    queryTest(Options(), faiss::METRIC_L2, true);
 }
 
 TEST(TestGpuIndexIVFFlat, Float16_32_Query_IP) {
-    queryTest(faiss::METRIC_INNER_PRODUCT, true);
+    queryTest(Options(), faiss::METRIC_INNER_PRODUCT, true);
 }
 
 //
@@ -317,19 +326,27 @@ TEST(TestGpuIndexIVFFlat, Float16_32_Query_IP) {
 //
 
 TEST(TestGpuIndexIVFFlat, Float32_Query_L2_64) {
-    queryTest(faiss::METRIC_L2, false, 64);
+    Options opt;
+    opt.dim = 64;
+    queryTest(opt, faiss::METRIC_L2, false);
 }
 
 TEST(TestGpuIndexIVFFlat, Float32_Query_IP_64) {
-    queryTest(faiss::METRIC_INNER_PRODUCT, false, 64);
+    Options opt;
+    opt.dim = 64;
+    queryTest(opt, faiss::METRIC_INNER_PRODUCT, false);
 }
 
 TEST(TestGpuIndexIVFFlat, Float32_Query_L2_128) {
-    queryTest(faiss::METRIC_L2, false, 128);
+    Options opt;
+    opt.dim = 128;
+    queryTest(opt, faiss::METRIC_L2, false);
 }
 
 TEST(TestGpuIndexIVFFlat, Float32_Query_IP_128) {
-    queryTest(faiss::METRIC_INNER_PRODUCT, false, 128);
+    Options opt;
+    opt.dim = 128;
+    queryTest(opt, faiss::METRIC_INNER_PRODUCT, false);
 }
 
 //
@@ -435,7 +452,7 @@ TEST(TestGpuIndexIVFFlat, QueryNaN) {
             numQuery * opt.dim, std::numeric_limits<float>::quiet_NaN());
 
     std::vector<float> distances(numQuery * opt.k, 0);
-    std::vector<faiss::Index::idx_t> indices(numQuery * opt.k, 0);
+    std::vector<faiss::idx_t> indices(numQuery * opt.k, 0);
 
     gpuIndex.search(
             numQuery, nans.data(), opt.k, distances.data(), indices.data());
@@ -484,7 +501,7 @@ TEST(TestGpuIndexIVFFlat, AddNaN) {
 
     std::vector<float> queryVecs = faiss::gpu::randVecs(opt.numQuery, opt.dim);
     std::vector<float> distance(opt.numQuery * opt.k, 0);
-    std::vector<faiss::Index::idx_t> indices(opt.numQuery * opt.k, 0);
+    std::vector<faiss::idx_t> indices(opt.numQuery * opt.k, 0);
 
     // should not crash
     gpuIndex.search(

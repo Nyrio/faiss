@@ -31,6 +31,8 @@
 #include <limits>
 #include <unordered_map>
 
+#include <raft/core/logger.hpp>
+
 namespace faiss {
 namespace gpu {
 
@@ -66,7 +68,7 @@ void RaftIVFFlat::search(
         int nprobe,
         int k,
         Tensor<float, 2, true>& outDistances,
-        Tensor<Index::idx_t, 2, true>& outIndices) {
+        Tensor<idx_t, 2, true>& outIndices) {
     printf("Inside RaftIVFFlat search()\n");
 
     // TODO: We probably don't want to ignore the coarse quantizer here...
@@ -87,11 +89,11 @@ void RaftIVFFlat::search(
 
     auto queries_view =
             raft::make_device_matrix_view<const float>(queries.data(), n, cols);
-    auto out_inds_view = raft::make_device_matrix_view<Index::idx_t>(
-            outIndices.data(), n, k_);
+    auto out_inds_view =
+            raft::make_device_matrix_view<idx_t>(outIndices.data(), n, k_);
     auto out_dists_view =
             raft::make_device_matrix_view<float>(outDistances.data(), n, k_);
-    raft::neighbors::ivf_flat::search<float, faiss::Index::idx_t>(
+    raft::neighbors::ivf_flat::search<float, idx_t>(
             raft_handle,
             *raft_knn_index,
             queries_view,
@@ -110,14 +112,15 @@ void RaftIVFFlat::search(
 int RaftIVFFlat::addVectors(
         Index* coarseQuantizer,
         Tensor<float, 2, true>& vecs,
-        Tensor<Index::idx_t, 1, true>& indices) {
+        Tensor<idx_t, 1, true>& indices) {
     printf("Inside RaftIVFFlat addVectors()\n");
 
-    auto vecs_view = raft::make_device_matrix_view<const float, Index::idx_t>(
+    raft::print_device_vector("add_vectors", vecs.data(), 50, std::cout);
+
+    auto vecs_view = raft::make_device_matrix_view<const float, idx_t>(
             vecs.data(), vecs.getSize(0), dim_);
-    auto inds_view =
-            raft::make_device_vector_view<const Index::idx_t, Index::idx_t>(
-                    indices.data(), (Index::idx_t)indices.getSize(0));
+    auto inds_view = raft::make_device_vector_view<const idx_t, idx_t>(
+            indices.data(), (idx_t)indices.getSize(0));
 
     const raft::handle_t& raft_handle =
             resources_->getRaftHandleCurrentDevice();
@@ -130,9 +133,9 @@ int RaftIVFFlat::addVectors(
                 raft_handle,
                 raft_knn_index.value(),
                 vecs_view,
-                std::make_optional<raft::device_vector_view<
-                        const Index::idx_t,
-                        Index::idx_t>>(inds_view)));
+                std::make_optional<
+                        raft::device_vector_view<const idx_t, idx_t>>(
+                        inds_view)));
 
     } else {
         printf("Index has not been trained!\n");
@@ -164,14 +167,14 @@ int RaftIVFFlat::getListLength(int listId) const {
 }
 
 /// Return the list indices of a particular list back to the CPU
-std::vector<Index::idx_t> RaftIVFFlat::getListIndices(int listId) const {
+std::vector<idx_t> RaftIVFFlat::getListIndices(int listId) const {
     printf("Inside RaftIVFFlat getListIndices\n");
 
     FAISS_ASSERT(raft_knn_index.has_value());
     const raft::handle_t& raft_handle =
             resources_->getRaftHandleCurrentDevice();
 
-    Index::idx_t offset;
+    idx_t offset;
     uint32_t size;
 
     raft::copy(
@@ -186,7 +189,7 @@ std::vector<Index::idx_t> RaftIVFFlat::getListIndices(int listId) const {
             raft_handle.get_stream());
     raft_handle.sync_stream();
 
-    std::vector<Index::idx_t> vec(size);
+    std::vector<idx_t> vec(size);
     raft::copy(
             vec.data(),
             raft_knn_index.value().indices().data_handle() + offset,
@@ -208,7 +211,7 @@ std::vector<uint8_t> RaftIVFFlat::getListVectorData(int listId, bool gpuFormat)
 
     using elem_t = decltype(raft_knn_index.value().data())::element_type;
     size_t dim = raft_knn_index.value().dim();
-    Index::idx_t offsets[2];
+    idx_t offsets[2];
     raft::copy(
             offsets,
             raft_knn_index.value().list_offsets().data_handle() + listId,
@@ -237,10 +240,10 @@ void RaftIVFFlat::searchPreassigned(
         Index* coarseQuantizer,
         Tensor<float, 2, true>& vecs,
         Tensor<float, 2, true>& ivfDistances,
-        Tensor<Index::idx_t, 2, true>& ivfAssignments,
+        Tensor<idx_t, 2, true>& ivfAssignments,
         int k,
         Tensor<float, 2, true>& outDistances,
-        Tensor<Index::idx_t, 2, true>& outIndices,
+        Tensor<idx_t, 2, true>& outIndices,
         bool storePairs) {
     printf("Inside RaftIVFFlat searchPreassigned\n");
 
@@ -248,7 +251,7 @@ void RaftIVFFlat::searchPreassigned(
 }
 
 void RaftIVFFlat::updateQuantizer(Index* quantizer) {
-    Index::idx_t quantizer_ntotal = quantizer->ntotal;
+    idx_t quantizer_ntotal = quantizer->ntotal;
 
     std::cout << "Calling RAFT updateQuantizer with trained index with "
               << quantizer_ntotal << " items" << std::endl;
@@ -257,7 +260,10 @@ void RaftIVFFlat::updateQuantizer(Index* quantizer) {
 
     auto total_elems = size_t(quantizer_ntotal) * size_t(quantizer->d);
 
+    raft::logger::get().set_level(RAFT_LEVEL_TRACE);
+
     raft::spatial::knn::ivf_flat::index_params pams;
+    pams.add_data_on_build = false;
 
     switch (this->metric_) {
         case faiss::METRIC_L2:
@@ -287,17 +293,15 @@ void RaftIVFFlat::updateQuantizer(Index* quantizer) {
 
     printf("Copying...\n");
 
-    auto& knn_index = raft_knn_index.value();
-
     raft::update_device(
-            knn_index.centers().data_handle(),
+            raft_knn_index.value().centers().data_handle(),
             buf_host.data(),
             total_elems,
             stream);
 
     raft::print_device_vector(
             "raft centers",
-            knn_index.centers().data_handle(),
+            raft_knn_index.value().centers().data_handle(),
             this->dim_,
             std::cout);
 }
